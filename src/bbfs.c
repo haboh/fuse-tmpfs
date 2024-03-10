@@ -55,7 +55,8 @@ static void bb_fullpath(char fpath[PATH_MAX], const char *path)
 int
 get_inode_by_name(const char *name, inode_num_t *inode) {
     for (size_t i = 0; i < BB_DATA->inode_lookup_table[*inode].dir_content_length; i++) {
-        if (strcmp(BB_DATA->inode_lookup_table[*inode].dir_content[i].name, name) == 0) {
+        char *filename = BB_DATA->inode_lookup_table[*inode].dir_content[i].name;
+        if (filename != NULL && strcmp(filename, name) == 0) {
             *inode = BB_DATA->inode_lookup_table[*inode].dir_content[i].inode;
             return 0;
         }
@@ -73,7 +74,11 @@ get_inode_num(const char *path, inode_num_t *inode, char **token) {
         if (get_inode_by_name(*token, inode) != 0) {
             return -ENOENT;
         }
-        *token = strtok(NULL, "/");
+        char *new_token = strtok(NULL, "/");
+        if (new_token == NULL) {
+            break;
+        }
+        *token = new_token;
     }
     return 0;
 }
@@ -120,8 +125,6 @@ int bb_getattr(const char *path, struct stat *statbuf)
     return 0;
 }
 
-
-
 int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode, char *token) {
     log_msg("file not exist %s\n", path);
 
@@ -163,10 +166,12 @@ int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode, char *to
     
     log_msg("length: %d\n", BB_DATA->inode_lookup_table[inode].dir_content_length);
     for (size_t i = 0; i < BB_DATA->inode_lookup_table[inode].dir_content_length; i++) {
-        log_msg("chld inode: %d, chld name: %s\n", 
-            BB_DATA->inode_lookup_table[inode].dir_content[i].inode, 
-            BB_DATA->inode_lookup_table[inode].dir_content[i].name);
-    }
+        if (BB_DATA->inode_lookup_table[inode].dir_content[i].name != NULL) {
+            log_msg("chld inode: %d, chld name: %s\n", 
+                BB_DATA->inode_lookup_table[inode].dir_content[i].inode, 
+                BB_DATA->inode_lookup_table[inode].dir_content[i].name);
+        }
+   }
     return 0;
 }
 
@@ -213,9 +218,10 @@ int bb_unlink(const char *path)
     
     log_msg("bb_unlink(path=\"%s\")\n",
 	    path);
-    bb_fullpath(fpath, path);
 
-    return log_syscall("unlink", unlink(fpath), 0);
+    // TODO
+
+    return 0;
 }
 
 /** Remove a directory */
@@ -223,39 +229,46 @@ int bb_rmdir(const char *path)
 {
     char fpath[PATH_MAX];
     
+    inode_num_t inode;
+    char *token;
+    if (get_inode_num(path, &inode, &token) != 0) {
+        // file already exist
+        return -ENOENT;
+    } else {
+        log_msg("token: %s\n", token);
+        for (size_t i = 0; i < BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content_length; i++) {
+            const char *name = BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content[i].name;
+            if (name != NULL && strcmp(name, token) == 0) {
+                BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content[i].name = NULL;
+            }
+        }
+    }
+
     log_msg("bb_rmdir(path=\"%s\")\n",
 	    path);
-    bb_fullpath(fpath, path);
 
-    return log_syscall("rmdir", rmdir(fpath), 0);
+    return 0;
 }
 
 /** Rename a file */
 // both path and newpath are fs-relative
 int bb_rename(const char *path, const char *newpath)
 {
-    char fpath[PATH_MAX];
-    char fnewpath[PATH_MAX];
-    
     log_msg("\nbb_rename(fpath=\"%s\", newpath=\"%s\")\n",
 	    path, newpath);
-    bb_fullpath(fpath, path);
-    bb_fullpath(fnewpath, newpath);
 
-    return log_syscall("rename", rename(fpath, fnewpath), 0);
+    // TODO
+
+    return 0;
 }
 
 /** Create a hard link to a file */
 int bb_link(const char *path, const char *newpath)
 {
-    char fpath[PATH_MAX], fnewpath[PATH_MAX];
-    
     log_msg("\nbb_link(path=\"%s\", newpath=\"%s\")\n",
 	    path, newpath);
-    bb_fullpath(fpath, path);
-    bb_fullpath(fnewpath, newpath);
-
-    return log_syscall("link", link(fpath, fnewpath), 0);
+    // TODO
+    return 0;
 }
 
 /** Change the size of a file */
@@ -463,6 +476,10 @@ int bb_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
     }
 
     for (size_t i = 0; i < BB_DATA->inode_lookup_table[inode].dir_content_length; i++) { 
+        if (BB_DATA->inode_lookup_table[inode].dir_content[i].name == NULL) {
+            continue;
+        }
+
         if (filler(buf, BB_DATA->inode_lookup_table[inode].dir_content[i].name, NULL, 0)) {
             log_msg("    ERROR bb_readdir filler:  buffer full");
             return -ENOMEM;
