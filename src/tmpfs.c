@@ -16,6 +16,7 @@
 
 #include "log.h"
 
+#include "inode_lookup_table.h"
 #include "filesystem.h"
 
 void
@@ -41,23 +42,24 @@ create_self_and_parent_link
 //  have the mountpoint.  I'll save it away early on in main(), and then
 //  whenever I need a path for something I'll call this to construct
 //  it.
-static void bb_fullpath(char fpath[PATH_MAX], const char *path)
+static void tmp_fullpath(char fpath[PATH_MAX], const char *path)
 {
-    strcpy(fpath, BB_DATA->rootdir);
+    strcpy(fpath, TMP_DATA->rootdir);
     strncat(fpath, path, PATH_MAX); // ridiculously long paths will
 				    // break here
 
-    log_msg("    bb_fullpath:  rootdir = \"%s\", path = \"%s\", fpath = \"%s\"\n",
-	    BB_DATA->rootdir, path, fpath);
+    log_msg("    tmp_fullpath:  rootdir = \"%s\", path = \"%s\", fpath = \"%s\"\n",
+	    TMP_DATA->rootdir, path, fpath);
 }
 
 
 int
-get_inode_by_name(const char *name, inode_num_t *inode) {
-    for (size_t i = 0; i < BB_DATA->inode_lookup_table[*inode].dir_content_length; i++) {
-        char *filename = BB_DATA->inode_lookup_table[*inode].dir_content[i].name;
+get_inode_by_name(const char *name, inode_num_t *inode_num) {
+    inode_t *inode = get_inode(&TMP_DATA->inode_table, *inode_num);
+    for (size_t i = 0; i < inode->dir_content_length; i++) {
+        char *filename = inode->dir_content[i].name;
         if (filename != NULL && strcmp(filename, name) == 0) {
-            *inode = BB_DATA->inode_lookup_table[*inode].dir_content[i].inode;
+            *inode_num = inode->dir_content[i].inode;
             return 0;
         }
     }
@@ -83,31 +85,33 @@ get_inode_num(const char *path, inode_num_t *inode, char **token) {
     return 0;
 }
 
-int bb_getattr(const char *path, struct stat *statbuf)
+int tmp_getattr(const char *path, struct stat *statbuf)
 {
-    log_msg("\nbb_getattr(path=\"%s\", statbuf=0x%08x)\n",
+    log_msg("\ntmp_getattr(path=\"%s\", statbuf=0x%08x)\n",
 	  path, statbuf);
 
-    inode_num_t inode;
+    inode_num_t inode_num;
     char *token;
-    int search_res = get_inode_num(path, &inode, &token);
+    int search_res = get_inode_num(path, &inode_num, &token);
     log_msg("search res: %d\n", search_res);
     if (search_res != 0) {
         return search_res;
     }
 
+    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
+
     mode_t st_mode = S_IRWXU | S_IRWXG | S_IRWXO; // change
-    if (BB_DATA->inode_lookup_table[inode].file_type == FILE_T) {
+    if (inode->file_type == FILE_T) {
         st_mode = S_IFREG;
     } else {
         st_mode = S_IFDIR;
     }
 
     struct stat new_stat_buf = {
-        .st_ino = inode,
+        .st_ino = inode->inode,
         .st_mode = st_mode,
-        .st_nlink = BB_DATA->inode_lookup_table[inode].nlink,
-        .st_size = BB_DATA->inode_lookup_table[inode].data_len,
+        .st_nlink = inode->nlink,
+        .st_size = inode->data_len,
         .st_dev = 0,
         .st_uid = 0, // change
         .st_gid = 0, // change
@@ -125,53 +129,29 @@ int bb_getattr(const char *path, struct stat *statbuf)
     return 0;
 }
 
-int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode, char *token) {
+int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode_num, char *token) {
     log_msg("file not exist %s\n", path);
 
-    inode_t new_file_inode = {
+    inode_t new_file_inode_value = {
         .data = NULL,
         .data_len = 0,
         .dir_content = NULL,
         .file_type = type,
-        .num = 0,
-        .parent_inode = inode,
+        .inode = 0,
+        .parent_inode = inode_num,
         .nlink = 0
         // add mode
     };
 
-    inode_num_t new_file_inode_num = ++BB_DATA->last_inode;
-
-    if (new_file_inode_num == INODE_COUNT) {
+    inode_t* inode = get_inode(&TMP_DATA->inode_table, inode_num);
+    inode_t* new_file_inode = allocate_inode(&TMP_DATA->inode_table);
+    if (new_file_inode == NULL) {
         return -ENOSPC;
     }
+    new_file_inode_value.inode = new_file_inode->inode;
 
-    log_msg("inode: %d\n", inode);
-    log_msg("length: %d\n", BB_DATA->inode_lookup_table[inode].dir_content_length);
-    // change
-    BB_DATA->inode_lookup_table[inode].dir_content = realloc(
-        BB_DATA->inode_lookup_table[inode].dir_content
-        , sizeof(dir_content_t) * (BB_DATA->inode_lookup_table[inode].dir_content_length + 1)
-    );
-
-    int index = BB_DATA->inode_lookup_table[inode].dir_content_length++;
-
-    BB_DATA->inode_lookup_table[inode].dir_content[index].inode = new_file_inode_num;
-    log_msg("%s\n", token);
-    log_msg("%d\n", strlen(token));
-    BB_DATA->inode_lookup_table[inode].dir_content[index].name = token;
-
-    log_msg("%s\n", BB_DATA->inode_lookup_table[inode].dir_content[index].name);
-
-    BB_DATA->inode_lookup_table[new_file_inode_num] = new_file_inode;
-    
-    log_msg("length: %d\n", BB_DATA->inode_lookup_table[inode].dir_content_length);
-    for (size_t i = 0; i < BB_DATA->inode_lookup_table[inode].dir_content_length; i++) {
-        if (BB_DATA->inode_lookup_table[inode].dir_content[i].name != NULL) {
-            log_msg("chld inode: %d, chld name: %s\n", 
-                BB_DATA->inode_lookup_table[inode].dir_content[i].inode, 
-                BB_DATA->inode_lookup_table[inode].dir_content[i].name);
-        }
-   }
+    append_new_name_to_inode(inode, new_file_inode->inode, token);
+    *new_file_inode = new_file_inode_value;
     return 0;
 }
 
@@ -181,9 +161,9 @@ int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode, char *to
  * creation of all non-directory, non-symlink nodes.
  */
 // shouldn't that comment be "if" there is no.... ?
-int bb_mknod(const char *path, mode_t mode, dev_t dev)
+int tmp_mknod(const char *path, mode_t mode, dev_t dev)
 {
-    log_msg("\nbb_mknod(path=\"%s\", mode=0%3o, dev=%lld)\n",
+    log_msg("\ntmp_mknod(path=\"%s\", mode=0%3o, dev=%lld)\n",
 	  path, mode, dev);
     inode_num_t inode;
     char *token;
@@ -198,7 +178,7 @@ int bb_mknod(const char *path, mode_t mode, dev_t dev)
 }
 
 /** Create a directory */
-int bb_mkdir(const char *path, mode_t mode)
+int tmp_mkdir(const char *path, mode_t mode)
 {
     inode_num_t inode;
     char *token;
@@ -212,11 +192,11 @@ int bb_mkdir(const char *path, mode_t mode)
 }
 
 /** Remove a file */
-int bb_unlink(const char *path)
+int tmp_unlink(const char *path)
 {
     char fpath[PATH_MAX];
     
-    log_msg("bb_unlink(path=\"%s\")\n",
+    log_msg("tmp_unlink(path=\"%s\")\n",
 	    path);
 
     // TODO
@@ -225,26 +205,27 @@ int bb_unlink(const char *path)
 }
 
 /** Remove a directory */
-int bb_rmdir(const char *path)
+int tmp_rmdir(const char *path)
 {
     char fpath[PATH_MAX];
     
-    inode_num_t inode;
+    inode_num_t inode_num;
     char *token;
-    if (get_inode_num(path, &inode, &token) != 0) {
+    if (get_inode_num(path, &inode_num, &token) != 0) {
         // file already exist
         return -ENOENT;
     } else {
         log_msg("token: %s\n", token);
-        for (size_t i = 0; i < BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content_length; i++) {
-            const char *name = BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content[i].name;
+        inode_t *inode = get_inode(&TMP_DATA->inode_table, get_inode(&TMP_DATA->inode_table, inode_num)->parent_inode);
+        for (size_t i = 0; i < inode->dir_content_length; i++) {
+            const char *name = inode->dir_content[i].name;
             if (name != NULL && strcmp(name, token) == 0) {
-                BB_DATA->inode_lookup_table[BB_DATA->inode_lookup_table[inode].parent_inode].dir_content[i].name = NULL;
+                inode->dir_content[i].name = NULL;
             }
         }
     }
 
-    log_msg("bb_rmdir(path=\"%s\")\n",
+    log_msg("tmp_rmdir(path=\"%s\")\n",
 	    path);
 
     return 0;
@@ -252,9 +233,9 @@ int bb_rmdir(const char *path)
 
 /** Rename a file */
 // both path and newpath are fs-relative
-int bb_rename(const char *path, const char *newpath)
+int tmp_rename(const char *path, const char *newpath)
 {
-    log_msg("\nbb_rename(fpath=\"%s\", newpath=\"%s\")\n",
+    log_msg("\ntmp_rename(fpath=\"%s\", newpath=\"%s\")\n",
 	    path, newpath);
 
     // TODO
@@ -263,28 +244,30 @@ int bb_rename(const char *path, const char *newpath)
 }
 
 /** Create a hard link to a file */
-int bb_link(const char *path, const char *newpath)
+int tmp_link(const char *path, const char *newpath)
 {
-    log_msg("\nbb_link(path=\"%s\", newpath=\"%s\")\n",
+    log_msg("\ntmp_link(path=\"%s\", newpath=\"%s\")\n",
 	    path, newpath);
     // TODO
     return 0;
 }
 
 /** Change the size of a file */
-int bb_truncate(const char *path, off_t newsize)
+int tmp_truncate(const char *path, off_t newsize)
 {
-    inode_num_t inode;
+    inode_num_t inode_num;
     char *token;
 
-    if (get_inode_num(path, &inode, &token) != 0) {
+    if (get_inode_num(path, &inode_num, &token) != 0) {
         return log_error("truncate");
     }
 
-    BB_DATA->inode_lookup_table[inode].data_len = newsize;
-    BB_DATA->inode_lookup_table[inode].data = realloc(BB_DATA->inode_lookup_table[inode].data, newsize);
+    inode_t* inode = get_inode(&TMP_DATA->inode_table, inode_num);
 
-    log_msg("\nbb_truncate(path=\"%s\", newsize=%lld)\n",
+    inode->data_len = newsize;
+    inode->data = realloc(inode->data, newsize);
+
+    log_msg("\ntmp_truncate(path=\"%s\", newsize=%lld)\n",
 	    path, newsize);
 
     return 0;
@@ -300,7 +283,7 @@ int bb_truncate(const char *path, off_t newsize)
  *
  * Changed in version 2.2
  */
-int bb_open(const char *path, struct fuse_file_info *fi)
+int tmp_open(const char *path, struct fuse_file_info *fi)
 {
     inode_num_t inode;
     char *token;
@@ -336,25 +319,27 @@ int bb_open(const char *path, struct fuse_file_info *fi)
 // can return with anything up to the amount of data requested. nor
 // with the fusexmp code which returns the amount of data also
 // returned by read.
-int bb_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
+int tmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
     int retstat = 0;
     
-    log_msg("\nbb_read(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
+    log_msg("\ntmp_read(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
 	    path, buf, size, offset, fi);
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
 
-    inode_num_t inode;
+    inode_num_t inode_num;
     char *token;
-    if (get_inode_num(path, &inode, &token) != 0) {
+    if (get_inode_num(path, &inode_num, &token) != 0) {
         return 0;
     }
 
-    size_t bytes_read_count = offset + size <= BB_DATA->inode_lookup_table[inode].data_len ?
-        size : BB_DATA->inode_lookup_table[inode].data_len - offset;
+    inode_t* inode = get_inode(&TMP_DATA->inode_table, inode_num);
 
-    memcpy(buf, BB_DATA->inode_lookup_table[inode].data, bytes_read_count);
+    size_t bytes_read_count = offset + size <= inode->data_len ?
+        size : inode->data_len - offset;
+
+    memcpy(buf, inode->data, bytes_read_count);
 
     return bytes_read_count;
 }
@@ -369,29 +354,31 @@ int bb_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_
  */
 // As  with read(), the documentation above is inconsistent with the
 // documentation for the write() system call.
-int bb_write(const char *path, const char *buf, size_t size, off_t offset,
+int tmp_write(const char *path, const char *buf, size_t size, off_t offset,
 	     struct fuse_file_info *fi)
 {
     int retstat = 0;
     
-    log_msg("\nbb_write(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
+    log_msg("\ntmp_write(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
 	    path, buf, size, offset, fi
 	    );
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
 
-    inode_num_t inode;
+    inode_num_t inode_num;
     char *token;
-    if (get_inode_num(path, &inode, &token) != 0) {
+    if (get_inode_num(path, &inode_num, &token) != 0) {
         return 0;
     }
+
+    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
     
-    if (offset + size > BB_DATA->inode_lookup_table[inode].data_len) {
-        BB_DATA->inode_lookup_table[inode].data_len = offset + size;
-        BB_DATA->inode_lookup_table[inode].data = realloc(BB_DATA->inode_lookup_table[inode].data, offset + size);
+    if (offset + size > inode->data_len) {
+        inode->data_len = offset + size;
+        inode->data = realloc(inode->data, offset + size);
     }
  
-    memcpy(BB_DATA->inode_lookup_table[inode].data + offset, buf, size);
+    memcpy(inode->data + offset, buf, size);
     return size;
 }
 
@@ -409,9 +396,9 @@ int bb_write(const char *path, const char *buf, size_t size, off_t offset,
  *
  * Changed in version 2.2
  */
-int bb_release(const char *path, struct fuse_file_info *fi)
+int tmp_release(const char *path, struct fuse_file_info *fi)
 {
-    log_msg("\nbb_release(path=\"%s\", fi=0x%08x)\n",
+    log_msg("\ntmp_release(path=\"%s\", fi=0x%08x)\n",
 	  path, fi);
     log_fi(fi);
 
@@ -425,15 +412,15 @@ int bb_release(const char *path, struct fuse_file_info *fi)
  *
  * Introduced in version 2.3
  */
-int bb_opendir(const char *path, struct fuse_file_info *fi)
+int tmp_opendir(const char *path, struct fuse_file_info *fi)
 {
-    log_msg("\nbb_opendir(path=\"%s\", fi=0x%08x)\n",
+    log_msg("\ntmp_opendir(path=\"%s\", fi=0x%08x)\n",
 	  path, fi);
 
     inode_num_t inode;
     char *token;
     if (get_inode_num(path, &inode, &token) != 0) {
-        return log_error("bb_opendir opendir");
+        return log_error("tmp_opendir opendir");
     }
 
     fi->fh = inode;
@@ -464,24 +451,26 @@ int bb_opendir(const char *path, struct fuse_file_info *fi)
  * Introduced in version 2.3
  */
 
-int bb_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
+int tmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
 	       struct fuse_file_info *fi)
 {
 
-    inode_num_t inode;
+    inode_num_t inode_num;
+    inode_t *inode;
     char *token;
-    if (get_inode_num(path, &inode, &token) != 0 || BB_DATA->inode_lookup_table[inode].file_type != DIRECTORY_T) {
+    if (get_inode_num(path, &inode_num, &token) != 0 
+        || (inode = get_inode(&TMP_DATA->inode_table, inode_num))->file_type != DIRECTORY_T) {
         errno = EBADF;
         return -1;
     }
 
-    for (size_t i = 0; i < BB_DATA->inode_lookup_table[inode].dir_content_length; i++) { 
-        if (BB_DATA->inode_lookup_table[inode].dir_content[i].name == NULL) {
+    for (size_t i = 0; i < inode->dir_content_length; i++) { 
+        if (inode->dir_content[i].name == NULL) {
             continue;
         }
 
-        if (filler(buf, BB_DATA->inode_lookup_table[inode].dir_content[i].name, NULL, 0)) {
-            log_msg("    ERROR bb_readdir filler:  buffer full");
+        if (filler(buf, inode->dir_content[i].name, NULL, 0)) {
+            log_msg("    ERROR tmp_readdir filler:  buffer full");
             return -ENOMEM;
         }
     }
@@ -510,28 +499,28 @@ int bb_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset
 // FUSE).
 
 
-void *bb_init(struct fuse_conn_info *conn)
+void *tmp_init(struct fuse_conn_info *conn)
 {
-    log_msg("\nbb_init()\n");
+    log_msg("\ntmp_init()\n");
 
     inode_t root_inode = {
         .data = NULL,
         .data_len = 0,
         .dir_content = NULL,
         .file_type = DIRECTORY_T,
-        .num = 0,
+        .inode = 0,
         .parent_inode = 0,
         .nlink = 0
     };
 
     create_self_and_parent_link(&root_inode.dir_content, &root_inode.dir_content_length, 0, 0);
 
-    BB_DATA->inode_lookup_table[0] = root_inode;
+    *allocate_inode(&TMP_DATA->inode_table) = root_inode;
 
     log_conn(conn);
     log_fuse_context(fuse_get_context());
     
-    return BB_DATA;
+    return TMP_DATA;
 }
 
 /**
@@ -541,9 +530,10 @@ void *bb_init(struct fuse_conn_info *conn)
  *
  * Introduced in version 2.3
  */
-void bb_destroy(void *userdata)
+void tmp_destroy(void *userdata)
 {
-    log_msg("\nbb_destroy(userdata=0x%08x)\n", userdata);
+    log_msg("\ntmp_destroy(userdata=0x%08x)\n", userdata);
+    destroy_lookup_table(&TMP_DATA->inode_table);
 }
 
 /**
@@ -557,38 +547,38 @@ void bb_destroy(void *userdata)
  *
  * Introduced in version 2.5
  */
-int bb_access(const char *path, int mask)
+int tmp_access(const char *path, int mask)
 {
     int retstat = 0;
 
-    log_msg("\nbb_access(path=\"%s\", mask=0%o)\n",
+    log_msg("\ntmp_access(path=\"%s\", mask=0%o)\n",
 	    path, mask);
 
     return 0;
 }
 
-struct fuse_operations bb_oper = {
-  .getattr = bb_getattr, // ok
+struct fuse_operations tmp_oper = {
+  .getattr = tmp_getattr, // ok
   .getdir = NULL, // ok
-  .mknod = bb_mknod, // ok
-  .mkdir = bb_mkdir, // ok
-  .unlink = bb_unlink, // ok
-  .rmdir = bb_rmdir, // ok
-  .rename = bb_rename, // ok
-  .link = bb_link, // ok
-  .truncate = bb_truncate, // ok
-  .open = bb_open, // ok
-  .read = bb_read, // ok
-  .write = bb_write, // ok
-  .release = bb_release, // ok
-  .opendir = bb_opendir, //ok
-  .readdir = bb_readdir, // ok
-  .init = bb_init, // ok
-  .destroy = bb_destroy, // ok
-  .access = bb_access, // ok
+  .mknod = tmp_mknod, // ok
+  .mkdir = tmp_mkdir, // ok
+  .unlink = tmp_unlink, // ok
+  .rmdir = tmp_rmdir, // ok
+  .rename = tmp_rename, // ok
+  .link = tmp_link, // ok
+  .truncate = tmp_truncate, // ok
+  .open = tmp_open, // ok
+  .read = tmp_read, // ok
+  .write = tmp_write, // ok
+  .release = tmp_release, // ok
+  .opendir = tmp_opendir, //ok
+  .readdir = tmp_readdir, // ok
+  .init = tmp_init, // ok
+  .destroy = tmp_destroy, // ok
+  .access = tmp_access, // ok
 };
 
-void bb_usage()
+void tmp_usage()
 {
     fprintf(stderr, "usage:  bbfs [FUSE and mount options] rootDir mountPoint\n");
     abort();
@@ -597,7 +587,7 @@ void bb_usage()
 int main(int argc, char *argv[])
 {
     int fuse_stat;
-    struct bb_state *bb_data;
+    struct tmp_state *TMP_DATA;
 
     // bbfs doesn't do any access checking on its own (the comment
     // blocks in fuse.h mention some of the functions that need
@@ -622,26 +612,26 @@ int main(int argc, char *argv[])
     // rootpoint or mountpoint whose name starts with a hyphen, but so
     // will a zillion other programs)
     if ((argc < 3) || (argv[argc-2][0] == '-') || (argv[argc-1][0] == '-'))
-	bb_usage();
+	tmp_usage();
 
-    bb_data = malloc(sizeof(struct bb_state));
-    if (bb_data == NULL) {
+    TMP_DATA = malloc(sizeof(struct tmp_state));
+    if (TMP_DATA == NULL) {
 	perror("main calloc");
 	abort();
     }
 
     // Pull the rootdir out of the argument list and save it in my
     // internal data
-    bb_data->rootdir = realpath(argv[argc-2], NULL);
+    TMP_DATA->rootdir = realpath(argv[argc-2], NULL);
     argv[argc-2] = argv[argc-1];
     argv[argc-1] = NULL;
     argc--;
     
-    bb_data->logfile = log_open();
-    bb_data->last_inode = 0;
+    TMP_DATA->logfile = log_open();
+    init_inode_lookup_table(&TMP_DATA->inode_table);
     // turn over control to fuse
     fprintf(stderr, "about to call fuse_main\n");
-    fuse_stat = fuse_main(argc, argv, &bb_oper, bb_data);
+    fuse_stat = fuse_main(argc, argv, &tmp_oper, TMP_DATA);
     fprintf(stderr, "fuse_main returned %d\n", fuse_stat);
     
     return fuse_stat;

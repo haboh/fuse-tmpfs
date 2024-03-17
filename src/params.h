@@ -8,8 +8,6 @@
   #including all the headers.
 */
 
-#include "filesystem.h"
-
 #ifndef _PARAMS_H_
 #define _PARAMS_H_
 
@@ -22,17 +20,15 @@
 // setlinebuf() later in consequence.
 #define _XOPEN_SOURCE 500
 
-#define INODE_COUNT (100)
-
 // maintain bbfs state in here
 #include <limits.h>
 #include <stdio.h>
-struct bb_state {
+#include "inode_lookup_table.h"
+struct tmp_state {
     FILE *logfile;
     char *rootdir;
-    size_t last_inode;
-    inode_t inode_lookup_table[INODE_COUNT];
+    inode_lookup_table inode_table;
 };
-#define BB_DATA ((struct bb_state *) fuse_get_context()->private_data)
+#define TMP_DATA ((struct tmp_state *) fuse_get_context()->private_data)
 
 #endif
