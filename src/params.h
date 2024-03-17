@@ -20,7 +20,7 @@
 // setlinebuf() later in consequence.
 #define _XOPEN_SOURCE 500
 
-// maintain bbfs state in here
+// maintain tmpfs state in here
 #include <limits.h>
 #include <stdio.h>
 #include "inode_lookup_table.h"

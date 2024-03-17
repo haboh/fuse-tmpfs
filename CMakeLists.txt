@@ -13,6 +13,8 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(FUSE REQUIRED fuse)
 
+file(MAKE_DIRECTORY "example/mountdir")
+
 add_executable(${TARGET_NAME} ${SRCS})
 target_include_directories(${TARGET_NAME} PUBLIC "include" ${FUSE_INCLUDE_DIRS})
 target_link_libraries(${TARGET_NAME} PUBLIC ${FUSE_LIBRARIES})

@@ -31,7 +31,7 @@ FILE *log_open()
     
     // very first thing, open up the logfile and mark that we got in
     // here.  If we can't open the logfile, we're dead.
-    logfile = fopen("bbfs.log", "w");
+    logfile = fopen("tmpfs.log", "w");
     if (logfile == NULL) {
 	perror("logfile");
 	exit(EXIT_FAILURE);
@@ -95,7 +95,7 @@ void log_fuse_context(struct fuse_context *context)
 
 // struct fuse_conn_info contains information about the socket
 // connection being used.  I don't actually use any of this
-// information in bbfs
+// information in tmpfs
 void log_conn(struct fuse_conn_info *conn)
 {
     log_msg("    conn:\n");
