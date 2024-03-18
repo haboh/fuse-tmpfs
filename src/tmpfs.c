@@ -1,24 +1,23 @@
 #include "config.h"
 #include "params.h"
+#include "log.h"
+#include "filesystem.h"
+#include "utils.h"
+#include "inode_lookup_table.h"
+#include "filesystem.h"
 
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
-#include <libgen.h> #include <limits.h>
+#include <libgen.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <sys/types.h>
-
-#include "log.h"
-
-#include "filesystem.h"
-#include "utils.h"
-#include "inode_lookup_table.h"
-#include "filesystem.h"
 
 int tmp_getattr(const char *path, struct stat *statbuf)
 {
@@ -36,14 +35,18 @@ int tmp_getattr(const char *path, struct stat *statbuf)
 
     inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
 
-    mode_t st_mode = S_IRWXU | S_IRWXG | S_IRWXO; // change
-    if (inode->file_type == FILE_T)
+    mode_t st_mode = S_IRWXU | S_IRWXG | S_IRWXO;
+    switch (inode->file_type)
     {
+    case FILE_T:
         st_mode = S_IFREG;
-    }
-    else
-    {
+        break;
+    case DIRECTORY_T:
         st_mode = S_IFDIR;
+        break;
+    case LINK_T:
+        st_mode = S_IFLNK;
+        break;
     }
 
     struct stat new_stat_buf = {
@@ -52,8 +55,8 @@ int tmp_getattr(const char *path, struct stat *statbuf)
         .st_nlink = inode->nlink,
         .st_size = inode->data_len,
         .st_dev = 0,
-        .st_uid = 0, // change
-        .st_gid = 0, // change
+        .st_uid = inode->uid,
+        .st_gid = inode->gid,
         .st_rdev = 0,
         .st_blksize = 0,
         .st_blocks = 0,
@@ -67,25 +70,24 @@ int tmp_getattr(const char *path, struct stat *statbuf)
     return 0;
 }
 
-int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode_num, char *name)
+int mk_item(enum FILE_TYPE_T type, inode_num_t inode_num, char *name)
 {
-    inode_t new_file_inode_value = {
-        .data = NULL,
-        .data_len = 0,
-        .file_type = type,
-        .inode = 0,
-        .parent_inode = inode_num,
-        .nlink = 0
-        // add mode
-    };
-
     inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
     inode_t *new_file_inode = allocate_inode(TMP_LOOKUP_TABLE);
     if (new_file_inode == NULL)
     {
         return -ENOSPC;
     }
-    new_file_inode_value.inode = new_file_inode->inode;
+    inode_t new_file_inode_value = {
+        .data = NULL,
+        .data_len = 0,
+        .file_type = type,
+        .inode = new_file_inode->inode,
+        .parent_inode = inode_num,
+        .nlink = 1,
+        .gid = inode->gid,
+        .uid = inode->uid,
+        .mode = S_IRWXU | S_IRWXG | S_IRWXO};
 
     append_new_name_to_inode(inode, new_file_inode->inode, name);
 
@@ -117,7 +119,7 @@ int tmp_mknod(const char *path, mode_t mode, dev_t dev)
             return -EINVAL;
         }
         // file not exist
-        return mk_item(FILE_T, path, inode, token);
+        return mk_item(FILE_T, inode, token);
     }
 }
 
@@ -140,27 +142,15 @@ int tmp_mkdir(const char *path, mode_t mode)
             return -EINVAL;
         }
         // file not exist
-        return mk_item(DIRECTORY_T, path, inode, token);
+        return mk_item(DIRECTORY_T, inode, token);
     }
-}
-
-int tmp_unlink(const char *path)
-{
-    char fpath[PATH_MAX];
-
-    log_msg("tmp_unlink(path=\"%s\")\n",
-            path);
-
-    // TODO
-
-    return 0;
 }
 
 /** Remove a directory */
 int tmp_rmdir(const char *path)
 {
-    char fpath[PATH_MAX];
-
+    log_msg("tmp_rmdir(path=\"%s\")\n",
+            path);
     inode_num_t inode_num;
     char *token;
     if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token) != 0)
@@ -177,9 +167,6 @@ int tmp_rmdir(const char *path)
         inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num)->parent_inode);
         remove_name_from_inode(inode, token);
     }
-
-    log_msg("tmp_rmdir(path=\"%s\")\n",
-            path);
 
     return 0;
 }
@@ -198,25 +185,38 @@ int tmp_rename(const char *path, const char *newpath)
         return -ENOENT;
     }
 
+    if (is_dir_staff(token))
+    {
+        return -EACCES;
+    }
+
     inode_num_t new_inode_num;
     char *new_token;
-    /*if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &new_inode_num, &new_token) != 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, newpath, &new_inode_num, &new_token) == 0)
     {
-        // file not exist
-        return -ENOENT;
-    }*/
+        // file already exist
+        return -EEXIST;
+    }
+
+    if (is_dir_staff(new_token))
+    {
+        return -EACCES;
+    }
 
     inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
-    inode_t *inode_new = get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode_num);
+    inode_t *new_inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode_num);
 
-    if (is_dir_staff(token) || is_dir_staff(new_token))
+    if (is_inode_subinode(TMP_LOOKUP_TABLE, inode, new_inode))
     {
         return -EINVAL;
     }
 
-    // if (inode->file_type == FILE_T && new_inode)
+    inode_num_t parent_inode, new_parent_inode;
+    get_prev_inode_by_path(TMP_LOOKUP_TABLE, path, &parent_inode, &token);
+    get_prev_inode_by_path(TMP_LOOKUP_TABLE, newpath, &new_parent_inode, &new_token);
 
-    // if (is_inode_subinode(ino))
+    remove_name_from_inode(get_inode_by_inode_num(TMP_LOOKUP_TABLE, parent_inode), token);
+    append_new_name_to_inode(get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_parent_inode), inode_num, new_token);
 
     return 0;
 }
@@ -228,39 +228,52 @@ int tmp_link(const char *path, const char *newpath)
 
     inode_num_t inode;
     char *token;
-    inode_num_t new_inode;
-    char *new_token;
-    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0 ||
-        get_inode_by_path(TMP_LOOKUP_TABLE, newpath, &new_inode, &new_token) == 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0)
     {
-        // file not exist or link already busy
+        // file not exist
         return -ENOENT;
     }
-    else
+
+    inode_num_t new_inode;
+    char *new_token;
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, newpath, &new_inode, &new_token) == 0)
     {
-        inode_t new_file_inode_value = {
-            .data = NULL,
-            .data_len = 0,
-            .file_type = LINK_T,
-            .inode = 0,
-            .parent_inode = new_inode,
-            .nlink = 0
-            // add mode
-        };
+        // file already exist
+        return -EEXIST;
+    }
 
-        inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode);
-        inode_t *new_file_inode = allocate_inode(TMP_LOOKUP_TABLE);
-        if (new_file_inode == NULL)
-        {
-            return -ENOSPC;
-        }
-        new_file_inode_value.inode = new_file_inode->inode;
+    get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode)->nlink++;
+    append_new_name_to_inode(get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode), inode, new_token);
 
-        append_new_name_to_inode(inode, new_file_inode->inode, new_token);
+    return 0;
+}
 
-        *new_file_inode = new_file_inode_value;
+int tmp_unlink(const char *path)
+{
+    log_msg("tmp_unlink(path=\"%s\")\n",
+            path);
 
-        return 0;
+    inode_num_t inode_num;
+    char *token;
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token) != 0)
+    {
+        // file not exist
+        return -ENOENT;
+    }
+
+    inode_num_t prev_inode_num;
+    char *prev_token;
+    get_prev_inode_by_path(TMP_LOOKUP_TABLE, path, &prev_inode_num, &prev_token);
+
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
+    inode_t *prev_inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, prev_inode_num);
+
+    inode->nlink--;
+    remove_name_from_inode(prev_inode, token);
+
+    if (inode->nlink == 0)
+    {
+        destroy_inode(TMP_LOOKUP_TABLE, inode);
     }
 
     return 0;
@@ -312,8 +325,6 @@ int tmp_open(const char *path, struct fuse_file_info *fi)
 
 int tmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse_file_info *fi)
 {
-    int retstat = 0;
-
     log_msg("\ntmp_read(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
             path, buf, size, offset, fi);
     // no need to get fpath on this one, since I work from fi->fh not the path
@@ -336,8 +347,6 @@ int tmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse
 int tmp_write(const char *path, const char *buf, size_t size, off_t offset,
               struct fuse_file_info *fi)
 {
-    int retstat = 0;
-
     log_msg("\ntmp_write(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
             path, buf, size, offset, fi);
     log_fi(fi);
@@ -360,7 +369,7 @@ int tmp_write(const char *path, const char *buf, size_t size, off_t offset,
         }
     }
 
-    memcpy(inode->data + offset, buf, size);
+    memcpy((char*)inode->data + offset, buf, size);
     return size;
 }
 
@@ -430,7 +439,10 @@ void *tmp_init(struct fuse_conn_info *conn)
         .file_type = DIRECTORY_T,
         .inode = 0,
         .parent_inode = 0,
-        .nlink = 0};
+        .nlink = 1,
+        .uid = TMP_DATA->uid_init,
+        .gid = TMP_DATA->gid_init,
+        .mode = S_IRWXU | S_IRWXG | S_IRWXO};
 
     *allocate_inode(TMP_LOOKUP_TABLE) = root_inode;
 
@@ -450,11 +462,19 @@ void tmp_destroy(void *userdata)
 
 int tmp_access(const char *path, int mask)
 {
-    int retstat = 0;
-
     log_msg("\ntmp_access(path=\"%s\", mask=0%o)\n", path, mask);
 
-    return 0;
+    inode_num_t inode;
+    char *token;
+
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0)
+    {
+        return -ENOENT;
+    }
+
+    int result = mask & get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode)->mode;
+
+    return result ? 0 : -EACCES;
 }
 
 struct fuse_operations tmp_oper = {
@@ -509,6 +529,8 @@ int main(int argc, char *argv[])
         abort();
     }
 
+    tmp_data->uid_init = getuid();
+    tmp_data->gid_init = getgid();
     tmp_data->rootdir = realpath(argv[argc - 1], NULL);
 
     tmp_data->logfile = log_open();

@@ -9,6 +9,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 file(GLOB SRCS "src/*.c")
 
+add_compile_options(-Wall -Wextra -Wpedantic)
+
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(FUSE REQUIRED fuse)

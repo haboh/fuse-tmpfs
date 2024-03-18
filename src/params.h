@@ -1,35 +1,23 @@
-/*
-  Copyright (C) 2012 Joseph J. Pfeiffer, Jr., Ph.D. <pfeiffer@cs.nmsu.edu>
-
-  This program can be distributed under the terms of the GNU GPLv3.
-  See the file COPYING.
-
-  There are a couple of symbols that need to be #defined before
-  #including all the headers.
-*/
-
 #ifndef _PARAMS_H_
 #define _PARAMS_H_
 
-// The FUSE API has been changed a number of times.  So, our code
-// needs to define the version of the API that we assume.  As of this
-// writing, the most current API version is 26
 #define FUSE_USE_VERSION 26
 
-// need this to get pwrite().  I have to use setvbuf() instead of
-// setlinebuf() later in consequence.
 #define _XOPEN_SOURCE 500
 
-// maintain tmpfs state in here
+#include "inode_lookup_table.h"
+
 #include <limits.h>
 #include <stdio.h>
-#include "inode_lookup_table.h"
-struct tmp_state {
-    FILE *logfile;
-    char *rootdir;
-    inode_lookup_table inode_table;
+struct tmp_state
+{
+  FILE *logfile;
+  char *rootdir;
+  uid_t uid_init;
+  gid_t gid_init;
+  inode_lookup_table inode_table;
 };
-#define TMP_DATA ((struct tmp_state *) fuse_get_context()->private_data)
+#define TMP_DATA ((struct tmp_state *)fuse_get_context()->private_data)
 #define TMP_LOOKUP_TABLE (&TMP_DATA->inode_table)
 
 #endif
