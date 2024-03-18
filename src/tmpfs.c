@@ -6,8 +6,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <fuse.h>
-#include <libgen.h>
-#include <limits.h>
+#include <libgen.h> #include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -16,70 +15,10 @@
 
 #include "log.h"
 
+#include "filesystem.h"
+#include "utils.h"
 #include "inode_lookup_table.h"
 #include "filesystem.h"
-
-char* copy_static_string(const char *s) {
-    int size = strlen(s) + 1;
-    char *new_string = malloc(size);
-    strcpy(new_string, s);
-    return new_string;
-}
-
-void create_self_and_parent_link(inode_num_t self_inode_num, inode_num_t parent_inode_num)
-{
-    log_msg("boba");
-    append_new_name_to_inode
-    (
-        get_inode(&TMP_DATA->inode_table, self_inode_num),
-        self_inode_num,
-        copy_static_string(".")
-    );
-    append_new_name_to_inode
-    (
-        get_inode(&TMP_DATA->inode_table, self_inode_num),
-        parent_inode_num,
-        copy_static_string("..")
-    );
-    log_msg("biba");
-}
-
-int get_inode_by_name(const char *name, inode_num_t *inode_num)
-{
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, *inode_num);
-    for (size_t i = 0; i < inode->dir_content_length; i++)
-    {
-        char *filename = inode->dir_content[i].name;
-        if (filename != NULL && strcmp(filename, name) == 0)
-        {
-            *inode_num = inode->dir_content[i].inode;
-            return 0;
-        }
-    }
-    return -1;
-}
-
-int get_inode_num(const char *path, inode_num_t *inode, char **token)
-{
-    char *path_copy = malloc(strlen(path) + 1);
-    strcpy(path_copy, path);
-    *token = strtok(path_copy, "/");
-    *inode = 0;
-    while (*token)
-    {
-        if (get_inode_by_name(*token, inode) != 0)
-        {
-            return -ENOENT;
-        }
-        char *new_token = strtok(NULL, "/");
-        if (new_token == NULL)
-        {
-            break;
-        }
-        *token = new_token;
-    }
-    return 0;
-}
 
 int tmp_getattr(const char *path, struct stat *statbuf)
 {
@@ -88,14 +27,14 @@ int tmp_getattr(const char *path, struct stat *statbuf)
 
     inode_num_t inode_num;
     char *token;
-    int search_res = get_inode_num(path, &inode_num, &token);
+    int search_res = get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token);
     log_msg("search res: %d\n", search_res);
     if (search_res != 0)
     {
         return search_res;
     }
 
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
 
     mode_t st_mode = S_IRWXU | S_IRWXG | S_IRWXO; // change
     if (inode->file_type == FILE_T)
@@ -128,14 +67,11 @@ int tmp_getattr(const char *path, struct stat *statbuf)
     return 0;
 }
 
-int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode_num, char *token)
+int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode_num, char *name)
 {
-    log_msg("file not exist %s\n", path);
-
     inode_t new_file_inode_value = {
         .data = NULL,
         .data_len = 0,
-        .dir_content = NULL,
         .file_type = type,
         .inode = 0,
         .parent_inode = inode_num,
@@ -143,21 +79,23 @@ int mk_item(enum FILE_TYPE_T type, const char *path, inode_num_t inode_num, char
         // add mode
     };
 
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
-    inode_t *new_file_inode = allocate_inode(&TMP_DATA->inode_table);
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
+    inode_t *new_file_inode = allocate_inode(TMP_LOOKUP_TABLE);
     if (new_file_inode == NULL)
     {
         return -ENOSPC;
     }
     new_file_inode_value.inode = new_file_inode->inode;
 
-    append_new_name_to_inode(inode, new_file_inode->inode, token);
-
-    if (type == DIRECTORY_T) {
-        create_self_and_parent_link(new_file_inode->inode, inode->inode);
-    }
+    append_new_name_to_inode(inode, new_file_inode->inode, name);
 
     *new_file_inode = new_file_inode_value;
+
+    if (type == DIRECTORY_T)
+    {
+        create_self_and_parent_link(TMP_LOOKUP_TABLE, new_file_inode->inode, inode->inode);
+    }
+
     return 0;
 }
 
@@ -167,13 +105,17 @@ int tmp_mknod(const char *path, mode_t mode, dev_t dev)
             path, mode, dev);
     inode_num_t inode;
     char *token;
-    if (get_inode_num(path, &inode, &token) == 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) == 0)
     {
         // file already exist
         return -EEXIST;
     }
     else
     {
+        if (is_dir_staff(token))
+        {
+            return -EINVAL;
+        }
         // file not exist
         return mk_item(FILE_T, path, inode, token);
     }
@@ -182,21 +124,26 @@ int tmp_mknod(const char *path, mode_t mode, dev_t dev)
 /** Create a directory */
 int tmp_mkdir(const char *path, mode_t mode)
 {
+    log_msg("\ntmp_mkdir(path=\"%s\", mode=0%3o)\n",
+            path, mode);
     inode_num_t inode;
     char *token;
-    if (get_inode_num(path, &inode, &token) == 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) == 0)
     {
         // file already exist
         return -EEXIST;
     }
     else
     {
+        if (is_dir_staff(token))
+        {
+            return -EINVAL;
+        }
         // file not exist
         return mk_item(DIRECTORY_T, path, inode, token);
     }
 }
 
-/** Remove a file */
 int tmp_unlink(const char *path)
 {
     char fpath[PATH_MAX];
@@ -216,23 +163,19 @@ int tmp_rmdir(const char *path)
 
     inode_num_t inode_num;
     char *token;
-    if (get_inode_num(path, &inode_num, &token) != 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token) != 0)
     {
-        // file already exist
+        // file not exist
         return -ENOENT;
     }
     else
     {
-        log_msg("token: %s\n", token);
-        inode_t *inode = get_inode(&TMP_DATA->inode_table, get_inode(&TMP_DATA->inode_table, inode_num)->parent_inode);
-        for (size_t i = 0; i < inode->dir_content_length; i++)
+        if (is_dir_staff(token))
         {
-            const char *name = inode->dir_content[i].name;
-            if (name != NULL && strcmp(name, token) == 0)
-            {
-                inode->dir_content[i].name = NULL;
-            }
+            return -EINVAL;
         }
+        inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num)->parent_inode);
+        remove_name_from_inode(inode, token);
     }
 
     log_msg("tmp_rmdir(path=\"%s\")\n",
@@ -247,7 +190,33 @@ int tmp_rename(const char *path, const char *newpath)
     log_msg("\ntmp_rename(fpath=\"%s\", newpath=\"%s\")\n",
             path, newpath);
 
-    // TODO
+    inode_num_t inode_num;
+    char *token;
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token) != 0)
+    {
+        // file not exist
+        return -ENOENT;
+    }
+
+    inode_num_t new_inode_num;
+    char *new_token;
+    /*if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &new_inode_num, &new_token) != 0)
+    {
+        // file not exist
+        return -ENOENT;
+    }*/
+
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
+    inode_t *inode_new = get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode_num);
+
+    if (is_dir_staff(token) || is_dir_staff(new_token))
+    {
+        return -EINVAL;
+    }
+
+    // if (inode->file_type == FILE_T && new_inode)
+
+    // if (is_inode_subinode(ino))
 
     return 0;
 }
@@ -256,7 +225,44 @@ int tmp_link(const char *path, const char *newpath)
 {
     log_msg("\ntmp_link(path=\"%s\", newpath=\"%s\")\n",
             path, newpath);
-    // TODO
+
+    inode_num_t inode;
+    char *token;
+    inode_num_t new_inode;
+    char *new_token;
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0 ||
+        get_inode_by_path(TMP_LOOKUP_TABLE, newpath, &new_inode, &new_token) == 0)
+    {
+        // file not exist or link already busy
+        return -ENOENT;
+    }
+    else
+    {
+        inode_t new_file_inode_value = {
+            .data = NULL,
+            .data_len = 0,
+            .file_type = LINK_T,
+            .inode = 0,
+            .parent_inode = new_inode,
+            .nlink = 0
+            // add mode
+        };
+
+        inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, new_inode);
+        inode_t *new_file_inode = allocate_inode(TMP_LOOKUP_TABLE);
+        if (new_file_inode == NULL)
+        {
+            return -ENOSPC;
+        }
+        new_file_inode_value.inode = new_file_inode->inode;
+
+        append_new_name_to_inode(inode, new_file_inode->inode, new_token);
+
+        *new_file_inode = new_file_inode_value;
+
+        return 0;
+    }
+
     return 0;
 }
 
@@ -265,15 +271,21 @@ int tmp_truncate(const char *path, off_t newsize)
     inode_num_t inode_num;
     char *token;
 
-    if (get_inode_num(path, &inode_num, &token) != 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode_num, &token) != 0)
     {
         return log_error("truncate");
     }
 
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, inode_num);
 
     inode->data_len = newsize;
     inode->data = realloc(inode->data, newsize);
+
+    if (inode->data == NULL)
+    {
+        perror("out of memory");
+        abort();
+    }
 
     log_msg("\ntmp_truncate(path=\"%s\", newsize=%lld)\n",
             path, newsize);
@@ -286,14 +298,10 @@ int tmp_open(const char *path, struct fuse_file_info *fi)
     inode_num_t inode;
     char *token;
 
-    if (get_inode_num(path, &inode, &token) != 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0)
     {
-        return log_error("open");
+        return log_error("open failed");
     }
-
-    // if the open call succeeds, my retstat is the file descriptor,
-    // else it's -errno.  I'm making sure that in that case the saved
-    // file descriptor is exactly -1.
 
     fi->fh = inode;
 
@@ -311,14 +319,12 @@ int tmp_read(const char *path, char *buf, size_t size, off_t offset, struct fuse
     // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
 
-    inode_num_t inode_num;
-    char *token;
-    if (get_inode_num(path, &inode_num, &token) != 0)
-    {
-        return 0;
-    }
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, fi->fh);
 
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
+    if (inode == NULL)
+    {
+        return -EBADF;
+    }
 
     size_t bytes_read_count = offset + size <= inode->data_len ? size : inode->data_len - offset;
 
@@ -334,22 +340,24 @@ int tmp_write(const char *path, const char *buf, size_t size, off_t offset,
 
     log_msg("\ntmp_write(path=\"%s\", buf=0x%08x, size=%d, offset=%lld, fi=0x%08x)\n",
             path, buf, size, offset, fi);
-    // no need to get fpath on this one, since I work from fi->fh not the path
     log_fi(fi);
 
-    inode_num_t inode_num;
-    char *token;
-    if (get_inode_num(path, &inode_num, &token) != 0)
-    {
-        return 0;
-    }
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, fi->fh);
 
-    inode_t *inode = get_inode(&TMP_DATA->inode_table, inode_num);
+    if (inode == NULL)
+    {
+        return -EBADF;
+    }
 
     if (offset + size > inode->data_len)
     {
         inode->data_len = offset + size;
         inode->data = realloc(inode->data, offset + size);
+        if (inode->data == NULL)
+        {
+            perror("out of memory");
+            abort();
+        }
     }
 
     memcpy(inode->data + offset, buf, size);
@@ -362,6 +370,8 @@ int tmp_release(const char *path, struct fuse_file_info *fi)
             path, fi);
     log_fi(fi);
 
+    // reset context with invalid descriptor
+    fi->fh = -1;
     return 0;
 }
 
@@ -372,7 +382,7 @@ int tmp_opendir(const char *path, struct fuse_file_info *fi)
 
     inode_num_t inode;
     char *token;
-    if (get_inode_num(path, &inode, &token) != 0)
+    if (get_inode_by_path(TMP_LOOKUP_TABLE, path, &inode, &token) != 0)
     {
         return log_error("tmp_opendir opendir");
     }
@@ -386,31 +396,26 @@ int tmp_opendir(const char *path, struct fuse_file_info *fi)
 int tmp_readdir(const char *path, void *buf, fuse_fill_dir_t filler, off_t offset,
                 struct fuse_file_info *fi)
 {
+    log_msg("\ntmp_readdir(path=\"%s\", fi=0x%08x)\n",
+            path, fi);
 
-    inode_num_t inode_num;
-    inode_t *inode;
-    char *token;
-    if (get_inode_num(path, &inode_num, &token) != 0 || (inode = get_inode(&TMP_DATA->inode_table, inode_num))->file_type != DIRECTORY_T)
+    log_fi(fi);
+
+    inode_t *inode = get_inode_by_inode_num(TMP_LOOKUP_TABLE, fi->fh);
+
+    if (inode == NULL)
     {
-        errno = EBADF;
-        return -1;
+        return -EBADF;
     }
 
-    for (size_t i = 0; i < inode->dir_content_length; i++)
+    for (size_t i = 0; i < get_dir_length(inode); i++)
     {
-        if (inode->dir_content[i].name == NULL)
-        {
-            continue;
-        }
-
-        if (filler(buf, inode->dir_content[i].name, NULL, 0))
+        if (filler(buf, get_dir_content(inode)[i].name, NULL, 0))
         {
             log_msg("    ERROR tmp_readdir filler:  buffer full");
             return -ENOMEM;
         }
     }
-
-    log_fi(fi);
 
     return 0;
 }
@@ -422,15 +427,14 @@ void *tmp_init(struct fuse_conn_info *conn)
     inode_t root_inode = {
         .data = NULL,
         .data_len = 0,
-        .dir_content = NULL,
         .file_type = DIRECTORY_T,
         .inode = 0,
         .parent_inode = 0,
         .nlink = 0};
 
-    *allocate_inode(&TMP_DATA->inode_table) = root_inode;
+    *allocate_inode(TMP_LOOKUP_TABLE) = root_inode;
 
-    create_self_and_parent_link(0, 0);
+    create_self_and_parent_link(TMP_LOOKUP_TABLE, 0, 0);
 
     log_conn(conn);
     log_fuse_context(fuse_get_context());
@@ -441,7 +445,7 @@ void *tmp_init(struct fuse_conn_info *conn)
 void tmp_destroy(void *userdata)
 {
     log_msg("\ntmp_destroy(userdata=0x%08x)\n", userdata);
-    destroy_lookup_table(&TMP_DATA->inode_table);
+    destroy_lookup_table(TMP_LOOKUP_TABLE);
 }
 
 int tmp_access(const char *path, int mask)
@@ -454,24 +458,24 @@ int tmp_access(const char *path, int mask)
 }
 
 struct fuse_operations tmp_oper = {
-    .getattr = tmp_getattr,   // ok
-    .getdir = NULL,           // ok
-    .mknod = tmp_mknod,       // ok
-    .mkdir = tmp_mkdir,       // ok
-    .unlink = tmp_unlink,     // ok
-    .rmdir = tmp_rmdir,       // ok
-    .rename = tmp_rename,     // ok
-    .link = tmp_link,         // ok
-    .truncate = tmp_truncate, // ok
-    .open = tmp_open,         // ok
-    .read = tmp_read,         // ok
-    .write = tmp_write,       // ok
-    .release = tmp_release,   // ok
-    .opendir = tmp_opendir,   // ok
-    .readdir = tmp_readdir,   // ok
-    .init = tmp_init,         // ok
-    .destroy = tmp_destroy,   // ok
-    .access = tmp_access,     // ok
+    .getattr = tmp_getattr,
+    .getdir = NULL,
+    .mknod = tmp_mknod,
+    .mkdir = tmp_mkdir,
+    .unlink = tmp_unlink,
+    .rmdir = tmp_rmdir,
+    .rename = tmp_rename,
+    .link = tmp_link,
+    .truncate = tmp_truncate,
+    .open = tmp_open,
+    .read = tmp_read,
+    .write = tmp_write,
+    .release = tmp_release,
+    .opendir = tmp_opendir,
+    .readdir = tmp_readdir,
+    .init = tmp_init,
+    .destroy = tmp_destroy,
+    .access = tmp_access,
 };
 
 void tmp_usage()

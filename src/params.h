@@ -30,5 +30,6 @@ struct tmp_state {
     inode_lookup_table inode_table;
 };
 #define TMP_DATA ((struct tmp_state *) fuse_get_context()->private_data)
+#define TMP_LOOKUP_TABLE (&TMP_DATA->inode_table)
 
 #endif

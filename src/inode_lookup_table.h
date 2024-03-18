@@ -11,9 +11,12 @@ typedef struct {
 } inode_lookup_table;
 
 void init_inode_lookup_table(inode_lookup_table* lt);
-inode_t* allocate_inode(inode_lookup_table* lt);
-inode_t* get_inode(inode_lookup_table* lt, inode_num_t inode_num);
-void append_new_name_to_inode(inode_t *inode, inode_num_t new_file_inode_num, char *name);
 void destroy_lookup_table(inode_lookup_table* lt);
+
+inode_t* allocate_inode(inode_lookup_table* lt);
+void create_self_and_parent_link(inode_lookup_table *lt, inode_num_t self_inode_num, inode_num_t parent_inode_num);
+
+inode_t* get_inode_by_inode_num(inode_lookup_table* lt, inode_num_t inode_num);
+int get_inode_by_path(inode_lookup_table* lt, const char *path, inode_num_t *inode, char **token);
 
 #endif // INODE_LOOKUP_TABLE_H
